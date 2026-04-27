@@ -151,6 +151,17 @@ jobs:
           cd /tmp && tar -xf nginx.tar.gz
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=source_downloaded version=${{ env.NGINX_VERSION }}"
 
+      - name: "Patch nginx ngx_linux_config.h for musl compat"
+        run: |
+          # nginx 1.26.x ngx_linux_config.h hace #include <crypt.h> incondicional.
+          # crypt.h es un header glibc-specific; musl declara crypt() en otros lugares
+          # pero no provee el header. Gateamos el include por __GLIBC__.
+          # TODO upstream: contribuir patch a nginx para gating proper.
+          sed -i 's|^#include <crypt.h>|#if defined(__GLIBC__)\n#include <crypt.h>\n#endif|' \
+            /tmp/nginx-${{ env.NGINX_VERSION }}/src/os/unix/ngx_linux_config.h
+          grep -A2 -B1 '__GLIBC__' /tmp/nginx-${{ env.NGINX_VERSION }}/src/os/unix/ngx_linux_config.h \
+            || { echo "level=error event=patch_failed"; exit 1; }
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=nginx_patched file=ngx_linux_config.h"
       - name: "Build nginx aarch64 musl static"
         run: |
           cd /tmp/nginx-${{ env.NGINX_VERSION }}
