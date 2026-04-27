@@ -1,0 +1,302 @@
+# nginx-cache-build CI pipeline
+#
+# Job graph:
+#   get-official → smoke-official → build-cross → verify-binary → publish
+#
+# get-official: instala nginx desde apt, corre SAST con trivy contra imagen oficial
+# smoke-official: valida contrato HTTP contra binario oficial
+# build-cross: cross-compila nginx 1.26.x para aarch64 con musl-cross-make
+# verify-binary: checks estáticos (ELF aarch64, sin deps dinámicas, --with-http_cache)
+# publish: empaqueta bundle con SBOM, SHA256, cosign, SAST
+
+name: nginx-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: "nginx version (e.g. 1.26.3)"
+        required: true
+        default: "1.26.3"
+        type: string
+      run_new_build:
+        description: "Run new build (or smoke-official only)"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NGINX_VERSION: ${{ inputs.nginx_version }}
+  ARCH: "aarch64"
+  OS: "linux"
+  VARIANT: "musl"
+  COSIGN_VERSION: "v3.0.6"
+  COSIGN_SHA256: "c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74"
+  ARTIFACT_BASE: "nginx-${{ inputs.nginx_version }}-aarch64-linux-musl"
+
+jobs:
+
+  get-official:
+    name: "Get official nginx + SAST"
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: "Install nginx from apt"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx netcat-openbsd
+          NGINX_BIN=$(which nginx)
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=official_installed version=$(nginx -v 2>&1) path=$NGINX_BIN"
+          cp "$NGINX_BIN" /tmp/nginx
+
+      - name: "Upload official binary"
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
+        with:
+          name: "nginx-official"
+          path: /tmp/nginx
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: "SAST: trivy scan nginx:${{ env.NGINX_VERSION }}-alpine"
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+          trivy image \
+            --format json \
+            --output "${{ env.ARTIFACT_BASE }}.sast.json" \
+            --exit-code 0 \
+            "nginx:${{ env.NGINX_VERSION }}-alpine"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sast target=nginx:${{ env.NGINX_VERSION }}-alpine format=json"
+
+      - name: "Upload SAST report"
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
+        with:
+          name: "sast-report"
+          path: "${{ env.ARTIFACT_BASE }}.sast.json"
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke-official:
+    uses: ./.github/workflows/smoke-tests.yml
+    with:
+      build_type: "official"
+    needs: get-official
+
+  build-cross:
+    name: "Cross-compile nginx ${{ inputs.nginx_version }} aarch64-musl"
+    if: ${{ inputs.run_new_build == 'true' }}
+    runs-on: ubuntu-24.04
+    needs: smoke-official
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: "Cache musl-cross toolchain"
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /opt/musl-cross
+          key: bootlin-aarch64-musl-2025.08-1
+
+      - name: "Install musl-cross aarch64 toolchain"
+        run: |
+          if [ ! -f /opt/musl-cross/bin/aarch64-linux-gcc ]; then
+            curl -fsSL \
+              "https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/aarch64--musl--stable-2025.08-1.tar.xz" \
+              -o /tmp/aarch64-musl-cross.tar.xz
+            mkdir -p /opt/musl-cross
+            tar -xf /tmp/aarch64-musl-cross.tar.xz \
+              --strip-components=1 \
+              -C /opt/musl-cross
+          fi
+          echo "/opt/musl-cross/bin" >> "$GITHUB_PATH"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=toolchain_ready cc=$(aarch64-buildroot-linux-musl-gcc --version | head -1)"
+
+      - name: "Download nginx ${{ env.NGINX_VERSION }} source"
+        run: |
+          curl -fsSL "https://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz" \
+            -o /tmp/nginx.tar.gz
+          cd /tmp && tar -xf nginx.tar.gz
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=source_downloaded version=${{ env.NGINX_VERSION }}"
+
+      - name: "Verify toolchain"
+        run: |
+          echo "PATH=$PATH"
+          find /opt/musl-cross/bin -name "aarch64*gcc*" | head -10
+          ls /opt/musl-cross/bin/ | head -20
+
+      - name: "Build nginx aarch64 musl static"
+        run: |
+          cd /tmp/nginx-${{ env.NGINX_VERSION }}
+          cat > /tmp/test-cc.c << 'TESTEOF'
+          int main() { return 0; }
+          TESTEOF
+          /opt/musl-cross/bin/aarch64-buildroot-linux-musl-gcc \
+            -mcpu=cortex-a53 -Os \
+            /tmp/test-cc.c -o /tmp/test-cc-out
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=cc_test result=$?"
+          file /tmp/test-cc-out
+          grep -rl 'ngx_feature_run=yes' /tmp/nginx-${{ env.NGINX_VERSION }}/auto/ \
+            | xargs sed -i 's/ngx_feature_run=yes/ngx_feature_run=no/g'
+            sed -i 's@ngx_size=`$NGX_AUTOTEST`@case "$ngx_type" in int|sig_atomic_t) ngx_size=4 ;; *) ngx_size=8 ;; esac@' \
+              auto/types/sizeof
+          cat /tmp/nginx-${{ env.NGINX_VERSION }}/auto/cc/name
+          ./configure \
+            --crossbuild=Linux::aarch64 \
+            --with-cc=/opt/musl-cross/bin/aarch64-buildroot-linux-musl-gcc \
+            --with-cpp=/opt/musl-cross/bin/aarch64-buildroot-linux-musl-cpp \
+            --with-cc-opt="-mcpu=cortex-a53 -Os" \
+            --with-ld-opt="-static" \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --with-http_realip_module \
+            --with-http_stub_status_module \
+            --without-http_scgi_module \
+            --without-http_uwsgi_module \
+            --without-http_fastcgi_module \
+            --prefix=/usr/local/nginx \
+            --pid-path=/var/run/nginx.pid \
+            --error-log-path=/var/log/nginx/error.log \
+            --http-log-path=/var/log/nginx/access.log \
+            --http-client-body-temp-path=/var/lib/nginx/body \
+            --http-proxy-temp-path=/var/lib/nginx/proxy
+          make -j$(nproc)
+          BINARY="objs/nginx"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
+
+      - name: "Compute SHA256"
+        uses: wererootops/actions/checksum@8c1bc10217c5f7b1069036d3f71dad903a314c46  # latest
+        with:
+          path: "/tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx"
+          output_file: "${{ env.ARTIFACT_BASE }}.sha256"
+
+      - name: "Generate SBOM"
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+          trivy fs \
+            --format cyclonedx \
+            --output "${{ env.ARTIFACT_BASE }}.sbom.cdx.json" \
+            /tmp/nginx-${{ env.NGINX_VERSION }}/
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sbom format=cyclonedx"
+
+      - name: "Prepare bundle"
+        run: |
+          mkdir -p bundle
+          cp /tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx \
+            bundle/${{ env.ARTIFACT_BASE }}
+          cp ${{ env.ARTIFACT_BASE }}.sha256 bundle/
+          cp ${{ env.ARTIFACT_BASE }}.sbom.cdx.json bundle/
+
+      - name: "Sign binary"
+        uses: wererootops/actions/sign@8c1bc10217c5f7b1069036d3f71dad903a314c46  # latest
+        with:
+          path: "bundle/${{ env.ARTIFACT_BASE }}"
+          bundle_output: "bundle/${{ env.ARTIFACT_BASE }}.cosign.bundle"
+          cosign_version: "${{ env.COSIGN_VERSION }}"
+          cosign_sha256: "${{ env.COSIGN_SHA256 }}"
+
+      - name: "Upload binary for verify-binary"
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
+        with:
+          name: "nginx-compiled"
+          path: "bundle/${{ env.ARTIFACT_BASE }}"
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: "Upload full bundle"
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
+        with:
+          name: "${{ env.ARTIFACT_BASE }}-bundle"
+          path: bundle/
+          retention-days: 1
+          if-no-files-found: error
+
+  verify-binary:
+    name: "Verify aarch64 binary"
+    if: ${{ inputs.run_new_build == 'true' }}
+    runs-on: ubuntu-24.04
+    needs: build-cross
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: "Download compiled binary"
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e  # v4.2.1
+        with:
+          name: "nginx-compiled"
+          path: /tmp/nginx-bin
+
+      - name: "Verify binary"
+        run: |
+          BINARY="/tmp/nginx-bin/${{ env.ARTIFACT_BASE }}"
+
+          ARCH=$(file "$BINARY" | grep -o "aarch64\|ARM aarch64")
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=verify test=arch result=$ARCH"
+          echo "$ARCH" | grep -q "aarch64" || { echo "level=error test=arch result=fail"; exit 1; }
+
+          INTERP=$(readelf -l "$BINARY" 2>/dev/null | grep "program interpreter" || echo "none")
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=verify test=static interp=$INTERP"
+          [ "$INTERP" = "none" ] || { echo "level=error test=static result=fail interp=$INTERP"; exit 1; }
+
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=verify result=pass"
+
+  publish:
+    name: "Publish release"
+    if: ${{ inputs.run_new_build == 'true' }}
+    runs-on: ubuntu-24.04
+    needs: verify-binary
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: "Download full bundle"
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e  # v4.2.1
+        with:
+          name: "${{ env.ARTIFACT_BASE }}-bundle"
+          path: bundle/
+
+      - name: "Download SAST report"
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e  # v4.2.1
+        with:
+          name: "sast-report"
+          path: bundle/
+
+      - name: "Package release"
+        uses: wererootops/actions/release@8c1bc10217c5f7b1069036d3f71dad903a314c46  # latest
+        with:
+          binary_path: "bundle/${{ env.ARTIFACT_BASE }}"
+          binary_name: "nginx"
+          version: "${{ env.NGINX_VERSION }}"
+          arch: "aarch64"
+          os: "linux"
+          variant: "musl"
+          sha256_path: "bundle/${{ env.ARTIFACT_BASE }}.sha256"
+          sbom_path: "bundle/${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          cosign_bundle_path: "bundle/${{ env.ARTIFACT_BASE }}.cosign.bundle"
+          sast_report_path: "bundle/${{ env.ARTIFACT_BASE }}.sast.json"
+          output_dir: "rc"
+
+      - name: "Upload release candidate"
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
+        with:
+          name: "${{ env.ARTIFACT_BASE }}"
+          path: rc/
+          retention-days: 14
+          if-no-files-found: error

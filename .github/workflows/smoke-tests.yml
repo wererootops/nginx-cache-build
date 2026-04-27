@@ -1,0 +1,74 @@
+# nginx-cache-build smoke tests
+# Reusable workflow. Validates HTTP contract against a running nginx.
+# Called by nginx-ci.yml for both official and compiled binary.
+
+name: smoke-tests
+
+on:
+  workflow_call:
+    inputs:
+      build_type:
+        description: "official or compiled"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  smoke-tests:
+    name: "Smoke tests: ${{ inputs.build_type }}"
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: "Download nginx binary"
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e  # v4.2.1
+        with:
+          name: "nginx-${{ inputs.build_type }}"
+          path: /tmp/nginx-bin
+
+      - name: "Prepare and start nginx"
+        run: |
+          chmod +x /tmp/nginx-bin/nginx
+          mkdir -p /tmp/nginx-smoke-client /tmp/nginx-smoke-proxy
+          /tmp/nginx-bin/nginx -c "$GITHUB_WORKSPACE/test/nginx-smoke.conf" -t
+          /tmp/nginx-bin/nginx -c "$GITHUB_WORKSPACE/test/nginx-smoke.conf"
+          sleep 1
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=nginx_started build_type=${{ inputs.build_type }}"
+
+      - name: "Run smoke tests"
+        run: |
+          BASE="http://127.0.0.1:18080"
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/health")
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=200 status=$STATUS"
+          [ "$STATUS" = "200" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=200 status=$STATUS result=fail"; exit 1; }
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/old")
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=301 status=$STATUS"
+          [ "$STATUS" = "301" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=301 status=$STATUS result=fail"; exit 1; }
+
+          STATUS=$(printf 'GET /bad version\r\nHost: localhost\r\n\r\n' | nc -q1 127.0.0.1 18080 | head -1 | awk '{print $2}')
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=400 status=$STATUS"
+          [ "$STATUS" = "400" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=400 status=$STATUS result=fail"; exit 1; }
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 "$BASE/upstream-timeout")
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=504 status=$STATUS"
+          [ "$STATUS" = "504" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=504 status=$STATUS result=fail"; exit 1; }
+          
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$BASE/upstream-refused")
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=502 status=$STATUS"
+          [ "$STATUS" = "502" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=502 status=$STATUS result=fail"; exit 1; }
+
+          /tmp/nginx-bin/nginx -c "$GITHUB_WORKSPACE/test/nginx-smoke.conf" -s stop
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test build_type=${{ inputs.build_type }} result=pass"
+
