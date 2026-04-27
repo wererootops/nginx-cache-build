@@ -21,7 +21,7 @@ env:
 jobs:
   smoke-tests:
     name: "Smoke tests: ${{ inputs.build_type }}"
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
 
     permissions:
       contents: read
@@ -64,11 +64,10 @@ jobs:
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 "$BASE/upstream-timeout")
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=504 status=$STATUS"
           [ "$STATUS" = "504" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=504 status=$STATUS result=fail"; exit 1; }
-          
+
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$BASE/upstream-refused")
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test test=502 status=$STATUS"
           [ "$STATUS" = "502" ] || { echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=error event=smoke_test test=502 status=$STATUS result=fail"; exit 1; }
 
           /tmp/nginx-bin/nginx -c "$GITHUB_WORKSPACE/test/nginx-smoke.conf" -s stop
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=smoke_test build_type=${{ inputs.build_type }} result=pass"
-

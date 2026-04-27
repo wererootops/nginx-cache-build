@@ -1,13 +1,29 @@
 # nginx-cache-build CI pipeline
 #
 # Job graph:
-#   get-official → smoke-official → build-cross → verify-binary → publish
+#   get-official → smoke-official → build-native → verify-binary → publish
 #
-# get-official: instala nginx desde apt, corre SAST con trivy contra imagen oficial
-# smoke-official: valida contrato HTTP contra binario oficial
-# build-cross: cross-compila nginx 1.26.x para aarch64 con musl-cross-make
-# verify-binary: checks estáticos (ELF aarch64, sin deps dinámicas, --with-http_cache)
-# publish: empaqueta bundle con SBOM, SHA256, cosign, SAST
+# Build target: nginx static aarch64-musl para AURELIO (GL-BE9300, OpenWrt aarch64).
+# Runner: ubuntu-24.04-arm (Cobalt 100 Neoverse N2, ARMv9-A).
+# Compilación: nativa aarch64. -mcpu=cortex-a53 fija ABI baseline para target.
+# C library: musl static via apt-installed musl-tools (musl-gcc wrapper).
+#
+# get-official: instala nginx desde apt (aarch64 nativo), corre SAST con trivy contra
+#   imagen oficial nginx:VERSION-alpine.
+#   NOTA: la version apt-instalada puede no coincidir con NGINX_VERSION del input;
+#   el SAST se hace contra el tag específico vía docker hub. Divergencia esperada.
+# smoke-official: valida contrato HTTP contra binario oficial.
+# build-native: compila nginx aarch64-musl static. PCRE2 buildeada como source tree
+#   (nginx la compila internamente con musl-gcc).
+#   TODO SSL: agregar build de OpenSSL desde fuente con musl-gcc, --with-openssl=path,
+#     --with-http_ssl_module en configure.
+#   TODO gzip: agregar build de zlib desde fuente con musl-gcc, --with-zlib=path,
+#     remover --without-http_gzip_module.
+# verify-binary: checks estáticos (ELF aarch64, sin deps dinámicas).
+# publish: empaqueta bundle con SBOM, SHA256, cosign, SAST.
+#
+# TODO smoke-compiled: ahora que el binario es ejecutable en el runner (mismo ARCH),
+#   reusar ./.github/workflows/smoke-tests.yml con build_type=compiled antes de publish.
 
 name: nginx-ci
 
@@ -40,12 +56,15 @@ env:
   COSIGN_VERSION: "v3.0.6"
   COSIGN_SHA256: "c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74"
   ARTIFACT_BASE: "nginx-${{ inputs.nginx_version }}-aarch64-linux-musl"
+  PCRE2_VERSION: "10.44"
+  # TODO SSL: OPENSSL_VERSION: "3.x.y"
+  # TODO gzip: ZLIB_VERSION: "1.3.1"
 
 jobs:
 
   get-official:
     name: "Get official nginx + SAST"
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
 
     permissions:
       contents: read
@@ -56,7 +75,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends nginx netcat-openbsd
           NGINX_BIN=$(which nginx)
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=official_installed version=$(nginx -v 2>&1) path=$NGINX_BIN"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=official_installed version=$(nginx -v 2>&1) path=$NGINX_BIN arch=$(uname -m)"
           cp "$NGINX_BIN" /tmp/nginx
 
       - name: "Upload official binary"
@@ -92,10 +111,10 @@ jobs:
       build_type: "official"
     needs: get-official
 
-  build-cross:
-    name: "Cross-compile nginx ${{ inputs.nginx_version }} aarch64-musl"
+  build-native:
+    name: "Build nginx ${{ inputs.nginx_version }} aarch64-musl"
     if: ${{ inputs.run_new_build == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     needs: smoke-official
 
     permissions:
@@ -106,65 +125,44 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
-      - name: "Cache musl-cross toolchain"
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
-        with:
-          path: /opt/musl-cross
-          key: bootlin-aarch64-musl-2025.08-1
-
-      - name: "Install musl-cross aarch64 toolchain"
+      - name: "Install musl-tools"
         run: |
-          if [ ! -f /opt/musl-cross/bin/aarch64-linux-gcc ]; then
-            curl -fsSL \
-              "https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/aarch64--musl--stable-2025.08-1.tar.xz" \
-              -o /tmp/aarch64-musl-cross.tar.xz
-            mkdir -p /opt/musl-cross
-            tar -xf /tmp/aarch64-musl-cross.tar.xz \
-              --strip-components=1 \
-              -C /opt/musl-cross
-          fi
-          echo "/opt/musl-cross/bin" >> "$GITHUB_PATH"
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=toolchain_ready cc=$(aarch64-buildroot-linux-musl-gcc --version | head -1)"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends musl-tools
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=musl_ready version=$(musl-gcc --version | head -1)"
+
+      - name: "Download PCRE2 ${{ env.PCRE2_VERSION }} source"
+        run: |
+          curl -fsSL "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${{ env.PCRE2_VERSION }}/pcre2-${{ env.PCRE2_VERSION }}.tar.gz" \
+            -o /tmp/pcre2.tar.gz
+          # TODO supply-chain: pinear SHA256 del tarball y verificar antes de extraer.
+          cd /tmp && tar -xf pcre2.tar.gz
+          test -f /tmp/pcre2-${{ env.PCRE2_VERSION }}/src/pcre2.h.generic
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=pcre2_source_ready version=${{ env.PCRE2_VERSION }}"
+
+      # TODO SSL: agregar step "Download OpenSSL source" análogo a PCRE2.
+      # TODO gzip: agregar step "Download zlib source" análogo a PCRE2.
 
       - name: "Download nginx ${{ env.NGINX_VERSION }} source"
         run: |
           curl -fsSL "https://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz" \
             -o /tmp/nginx.tar.gz
+          # TODO supply-chain: pinear SHA256 del tarball y verificar antes de extraer.
           cd /tmp && tar -xf nginx.tar.gz
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=source_downloaded version=${{ env.NGINX_VERSION }}"
-
-      - name: "Verify toolchain"
-        run: |
-          echo "PATH=$PATH"
-          find /opt/musl-cross/bin -name "aarch64*gcc*" | head -10
-          ls /opt/musl-cross/bin/ | head -20
 
       - name: "Build nginx aarch64 musl static"
         run: |
           cd /tmp/nginx-${{ env.NGINX_VERSION }}
-          cat > /tmp/test-cc.c << 'TESTEOF'
-          int main() { return 0; }
-          TESTEOF
-          /opt/musl-cross/bin/aarch64-buildroot-linux-musl-gcc \
-            -mcpu=cortex-a53 -Os \
-            /tmp/test-cc.c -o /tmp/test-cc-out
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=cc_test result=$?"
-          file /tmp/test-cc-out
-          grep -rl 'ngx_feature_run=yes' /tmp/nginx-${{ env.NGINX_VERSION }}/auto/ \
-            | xargs sed -i 's/ngx_feature_run=yes/ngx_feature_run=no/g'
-            sed -i 's@ngx_size=`$NGX_AUTOTEST`@case "$ngx_type" in int|sig_atomic_t) ngx_size=4 ;; *) ngx_size=8 ;; esac@' \
-              auto/types/sizeof
-          cat /tmp/nginx-${{ env.NGINX_VERSION }}/auto/cc/name
           ./configure \
-            --crossbuild=Linux::aarch64 \
-            --with-cc=/opt/musl-cross/bin/aarch64-buildroot-linux-musl-gcc \
-            --with-cpp=/opt/musl-cross/bin/aarch64-buildroot-linux-musl-cpp \
+            --with-cc=musl-gcc \
             --with-cc-opt="-mcpu=cortex-a53 -Os" \
             --with-ld-opt="-static" \
-            --with-http_ssl_module \
+            --with-pcre=/tmp/pcre2-${{ env.PCRE2_VERSION }} \
             --with-http_v2_module \
             --with-http_realip_module \
             --with-http_stub_status_module \
+            --without-http_gzip_module \
             --without-http_scgi_module \
             --without-http_uwsgi_module \
             --without-http_fastcgi_module \
@@ -174,6 +172,8 @@ jobs:
             --http-log-path=/var/log/nginx/access.log \
             --http-client-body-temp-path=/var/lib/nginx/body \
             --http-proxy-temp-path=/var/lib/nginx/proxy
+          # TODO SSL: agregar --with-http_ssl_module y --with-openssl=/tmp/openssl-${OPENSSL_VERSION}
+          # TODO gzip: remover --without-http_gzip_module y agregar --with-zlib=/tmp/zlib-${ZLIB_VERSION}
           make -j$(nproc)
           BINARY="objs/nginx"
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
@@ -226,11 +226,19 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # TODO smoke-compiled: descomentar cuando querramos correr smoke tests contra el
+  # binario propio (ahora posible porque runner y target son ambos aarch64).
+  # smoke-compiled:
+  #   uses: ./.github/workflows/smoke-tests.yml
+  #   with:
+  #     build_type: "compiled"
+  #   needs: build-native
+
   verify-binary:
     name: "Verify aarch64 binary"
     if: ${{ inputs.run_new_build == 'true' }}
-    runs-on: ubuntu-24.04
-    needs: build-cross
+    runs-on: ubuntu-24.04-arm
+    needs: build-native
 
     permissions:
       contents: read
@@ -259,7 +267,7 @@ jobs:
   publish:
     name: "Publish release"
     if: ${{ inputs.run_new_build == 'true' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     needs: verify-binary
 
     permissions:
