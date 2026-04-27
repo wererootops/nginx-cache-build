@@ -1,29 +1,28 @@
 # nginx-cache-build CI pipeline
 #
 # Job graph:
-#   get-official → smoke-official → build-native → verify-binary → publish
+#   get-official -> smoke-official -> build-native -> [smoke-compiled] -> verify-binary -> publish
 #
-# Build target: nginx static aarch64-musl para AURELIO (GL-BE9300, OpenWrt aarch64).
+# Build target: nginx static aarch64-musl for AURELIO (GL-BE9300, OpenWrt aarch64).
 # Runner: ubuntu-24.04-arm (Cobalt 100 Neoverse N2, ARMv9-A).
-# Compilación: nativa aarch64. -mcpu=cortex-a53 fija ABI baseline para target.
+# Compilation: native aarch64. -mcpu=cortex-a53 sets ABI baseline for target.
 # C library: musl static via apt-installed musl-tools (musl-gcc wrapper).
 #
-# get-official: instala nginx desde apt (aarch64 nativo), corre SAST con trivy contra
-#   imagen oficial nginx:VERSION-alpine.
-#   NOTA: la version apt-instalada puede no coincidir con NGINX_VERSION del input;
-#   el SAST se hace contra el tag específico vía docker hub. Divergencia esperada.
-# smoke-official: valida contrato HTTP contra binario oficial.
-# build-native: compila nginx aarch64-musl static. PCRE2 buildeada como source tree
-#   (nginx la compila internamente con musl-gcc).
-#   TODO SSL: agregar build de OpenSSL desde fuente con musl-gcc, --with-openssl=path,
-#     --with-http_ssl_module en configure.
-#   TODO gzip: agregar build de zlib desde fuente con musl-gcc, --with-zlib=path,
-#     remover --without-http_gzip_module.
-# verify-binary: checks estáticos (ELF aarch64, sin deps dinámicas).
-# publish: empaqueta bundle con SBOM, SHA256, cosign, SAST.
-#
-# TODO smoke-compiled: ahora que el binario es ejecutable en el runner (mismo ARCH),
-#   reusar ./.github/workflows/smoke-tests.yml con build_type=compiled antes de publish.
+# get-official: installs nginx from apt (native aarch64), runs trivy SAST against
+#   the official nginx:VERSION-alpine image.
+#   NOTE: apt-installed version may not match NGINX_VERSION input; SAST runs
+#   against the specific tag via Docker Hub. Divergence is expected.
+# smoke-official: validates HTTP contract against the official binary.
+# build-native: compiles nginx aarch64-musl static. PCRE2 is built as a source tree
+#   (nginx compiles it internally with musl-gcc).
+#   TODO SSL: add OpenSSL build from source with musl-gcc, --with-openssl=path,
+#     --with-http_ssl_module in configure.
+#   TODO gzip: add zlib build from source with musl-gcc, --with-zlib=path,
+#     remove --without-http_gzip_module.
+# smoke-compiled: validates HTTP contract against the freshly built binary.
+#   Possible because runner and target share aarch64.
+# verify-binary: static checks (ELF aarch64, no dynamic deps).
+# publish: bundles SBOM, SHA256, cosign signature, SAST.
 
 name: nginx-ci
 
@@ -39,6 +38,14 @@ on:
         description: "Run new build (or smoke-official only)"
         required: true
         default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      run_smoke_compiled:
+        description: "Run smoke tests against the compiled binary"
+        required: true
+        default: "true"
         type: choice
         options:
           - "false"
@@ -135,33 +142,34 @@ jobs:
         run: |
           curl -fsSL "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${{ env.PCRE2_VERSION }}/pcre2-${{ env.PCRE2_VERSION }}.tar.gz" \
             -o /tmp/pcre2.tar.gz
-          # TODO supply-chain: pinear SHA256 del tarball y verificar antes de extraer.
+          # TODO supply-chain: pin tarball SHA256 and verify before extracting.
           cd /tmp && tar -xf pcre2.tar.gz
           test -f /tmp/pcre2-${{ env.PCRE2_VERSION }}/src/pcre2.h.generic
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=pcre2_source_ready version=${{ env.PCRE2_VERSION }}"
 
-      # TODO SSL: agregar step "Download OpenSSL source" análogo a PCRE2.
-      # TODO gzip: agregar step "Download zlib source" análogo a PCRE2.
+      # TODO SSL: add a "Download OpenSSL source" step analogous to PCRE2.
+      # TODO gzip: add a "Download zlib source" step analogous to PCRE2.
 
       - name: "Download nginx ${{ env.NGINX_VERSION }} source"
         run: |
           curl -fsSL "https://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz" \
             -o /tmp/nginx.tar.gz
-          # TODO supply-chain: pinear SHA256 del tarball y verificar antes de extraer.
+          # TODO supply-chain: pin tarball SHA256 and verify before extracting.
           cd /tmp && tar -xf nginx.tar.gz
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=source_downloaded version=${{ env.NGINX_VERSION }}"
 
       - name: "Patch nginx ngx_linux_config.h for musl compat"
         run: |
-          # nginx 1.26.x ngx_linux_config.h hace #include <crypt.h> incondicional.
-          # crypt.h es un header glibc-specific; musl declara crypt() en otros lugares
-          # pero no provee el header. Gateamos el include por __GLIBC__.
-          # TODO upstream: contribuir patch a nginx para gating proper.
+          # nginx 1.26.x ngx_linux_config.h does an unconditional #include <crypt.h>.
+          # crypt.h is glibc-specific; musl declares crypt() elsewhere but does not
+          # ship the header. Gate the include behind __GLIBC__.
+          # TODO upstream: contribute a proper gating patch to nginx.
           sed -i 's|^#include <crypt.h>|#if defined(__GLIBC__)\n#include <crypt.h>\n#endif|' \
             /tmp/nginx-${{ env.NGINX_VERSION }}/src/os/unix/ngx_linux_config.h
           grep -A2 -B1 '__GLIBC__' /tmp/nginx-${{ env.NGINX_VERSION }}/src/os/unix/ngx_linux_config.h \
             || { echo "level=error event=patch_failed"; exit 1; }
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=nginx_patched file=ngx_linux_config.h"
+
       - name: "Build nginx aarch64 musl static"
         run: |
           cd /tmp/nginx-${{ env.NGINX_VERSION }}
@@ -183,8 +191,8 @@ jobs:
             --http-log-path=/var/log/nginx/access.log \
             --http-client-body-temp-path=/var/lib/nginx/body \
             --http-proxy-temp-path=/var/lib/nginx/proxy
-          # TODO SSL: agregar --with-http_ssl_module y --with-openssl=/tmp/openssl-${OPENSSL_VERSION}
-          # TODO gzip: remover --without-http_gzip_module y agregar --with-zlib=/tmp/zlib-${ZLIB_VERSION}
+          # TODO SSL: add --with-http_ssl_module and --with-openssl=/tmp/openssl-${OPENSSL_VERSION}
+          # TODO gzip: drop --without-http_gzip_module and add --with-zlib=/tmp/zlib-${ZLIB_VERSION}
           make -j$(nproc)
           BINARY="objs/nginx"
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
@@ -221,7 +229,7 @@ jobs:
           cosign_version: "${{ env.COSIGN_VERSION }}"
           cosign_sha256: "${{ env.COSIGN_SHA256 }}"
 
-      - name: "Upload binary for verify-binary"
+      - name: "Upload binary for downstream jobs"
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
         with:
           name: "nginx-compiled"
@@ -237,13 +245,12 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # TODO smoke-compiled: descomentar cuando querramos correr smoke tests contra el
-  # binario propio (ahora posible porque runner y target son ambos aarch64).
-  # smoke-compiled:
-  #   uses: ./.github/workflows/smoke-tests.yml
-  #   with:
-  #     build_type: "compiled"
-  #   needs: build-native
+  smoke-compiled:
+    if: ${{ inputs.run_new_build == 'true' && inputs.run_smoke_compiled == 'true' }}
+    uses: ./.github/workflows/smoke-tests.yml
+    with:
+      build_type: "compiled"
+    needs: build-native
 
   verify-binary:
     name: "Verify aarch64 binary"
@@ -279,7 +286,7 @@ jobs:
     name: "Publish release"
     if: ${{ inputs.run_new_build == 'true' }}
     runs-on: ubuntu-24.04-arm
-    needs: verify-binary
+    needs: [verify-binary, smoke-compiled]
 
     permissions:
       contents: read
