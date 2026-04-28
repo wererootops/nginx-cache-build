@@ -218,6 +218,10 @@ jobs:
           mkdir -p bundle
           cp /tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx \
             bundle/${{ env.ARTIFACT_BASE }}
+          # Stable filename for downstream jobs (smoke tests, verify) that don't
+          # care about versioning. Versioned name is preserved for release.
+          cp /tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx \
+            bundle/nginx
           cp ${{ env.ARTIFACT_BASE }}.sha256 bundle/
           cp ${{ env.ARTIFACT_BASE }}.sbom.cdx.json bundle/
 
@@ -233,7 +237,7 @@ jobs:
         uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b  # v4.5.0
         with:
           name: "nginx-compiled"
-          path: "bundle/${{ env.ARTIFACT_BASE }}"
+          path: "bundle/nginx"
           retention-days: 1
           if-no-files-found: error
 
