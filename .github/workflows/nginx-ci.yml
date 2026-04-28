@@ -61,7 +61,7 @@ env:
   OS: "linux"
   VARIANT: "musl"
   COSIGN_VERSION: "v3.0.6"
-  COSIGN_SHA256: "c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74"
+  COSIGN_SHA256: "bedac92e8c3729864e13d4a17048007cfafa79d5deca993a43a90ffe018ef2b8"
   ARTIFACT_BASE: "nginx-${{ inputs.nginx_version }}-aarch64-linux-musl"
   PCRE2_VERSION: "10.44"
   # TODO SSL: OPENSSL_VERSION: "3.x.y"
@@ -198,7 +198,7 @@ jobs:
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
 
       - name: "Compute SHA256"
-        uses: wererootops/actions/checksum@8c1bc10217c5f7b1069036d3f71dad903a314c46  # latest
+        uses: wererootops/actions/checksum@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
         with:
           path: "/tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx"
           output_file: "${{ env.ARTIFACT_BASE }}.sha256"
@@ -222,7 +222,7 @@ jobs:
           cp ${{ env.ARTIFACT_BASE }}.sbom.cdx.json bundle/
 
       - name: "Sign binary"
-        uses: wererootops/actions/sign@8c1bc10217c5f7b1069036d3f71dad903a314c46  # latest
+        uses: wererootops/actions/sign@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
         with:
           path: "bundle/${{ env.ARTIFACT_BASE }}"
           bundle_output: "bundle/${{ env.ARTIFACT_BASE }}.cosign.bundle"
@@ -305,7 +305,7 @@ jobs:
           path: bundle/
 
       - name: "Package release"
-        uses: wererootops/actions/release@8c1bc10217c5f7b1069036d3f71dad903a314c46  # latest
+        uses: wererootops/actions/release@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
         with:
           binary_path: "bundle/${{ env.ARTIFACT_BASE }}"
           binary_name: "nginx"
