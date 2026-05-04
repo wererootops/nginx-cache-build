@@ -15,8 +15,6 @@
 # smoke-official: validates HTTP contract against the official binary.
 # build-native: compiles nginx aarch64-musl static. PCRE2 is built as a source tree
 #   (nginx compiles it internally with musl-gcc).
-#   TODO SSL: add OpenSSL build from source with musl-gcc, --with-openssl=path,
-#     --with-http_ssl_module in configure.
 #   TODO gzip: add zlib build from source with musl-gcc, --with-zlib=path,
 #     remove --without-http_gzip_module.
 # smoke-compiled: validates HTTP contract against the freshly built binary.
@@ -65,7 +63,8 @@ env:
   PCRE2_VERSION: "10.44"
   OPENSSL_VERSION: "3.5.6"
   OPENSSL_SHA256: "deae7c80cba99c4b4f940ecadb3c3338b13cb77418409238e57d7f31f2a3b736"
-  # TODO gzip: ZLIB_VERSION: "1.3.1"
+  ZLIB_VERSION: "1.3.2"
+  ZLIB_SHA256: "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
 
 jobs:
 
@@ -156,7 +155,14 @@ jobs:
           cd /tmp && tar -xzf openssl.tar.gz
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=openssl_downloaded version=${{ env.OPENSSL_VERSION }}"
 
-      # TODO gzip: add a "Download zlib source" step analogous to PCRE2.
+      - name: "Download zlib ${{ env.ZLIB_VERSION }} source"
+        run: |
+          curl -fsSL "https://github.com/madler/zlib/releases/download/v${{ env.ZLIB_VERSION }}/zlib-${{ env.ZLIB_VERSION }}.tar.gz" \
+            -o /tmp/zlib.tar.gz
+          # TODO supply-chain: pin tarball SHA256 and verify before extracting.
+          cd /tmp && tar -xzf zlib.tar.gz
+          test -f /tmp/zlib-${{ env.ZLIB_VERSION }}/zlib.h
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=zlib_source_ready version=${{ env.ZLIB_VERSION }}"
 
       - name: "Download nginx ${{ env.NGINX_VERSION }} source"
         run: |
@@ -192,7 +198,7 @@ jobs:
             --with-http_ssl_module \
             --with-openssl=/tmp/openssl-${{ env.OPENSSL_VERSION }} \
             --with-openssl-opt="no-shared no-afalgeng no-async no-engine -D_FORTIFY_SOURCE=0 -U_FORTIFY_SOURCE -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64"
-            --without-http_gzip_module \
+            --with-zlib=/tmp/zlib-${{ env.ZLIB_VERSION }} \
             --without-http_scgi_module \
             --without-http_uwsgi_module \
             --without-http_fastcgi_module \
