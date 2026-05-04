@@ -197,7 +197,7 @@ jobs:
             --with-http_stub_status_module \
             --with-http_ssl_module \
             --with-openssl=/tmp/openssl-${{ env.OPENSSL_VERSION }} \
-            --with-openssl-opt="no-shared no-afalgeng no-async no-engine -D_FORTIFY_SOURCE=0 -U_FORTIFY_SOURCE -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64"
+            --with-openssl-opt="no-shared no-afalgeng no-async no-engine -D_FORTIFY_SOURCE=0 -U_FORTIFY_SOURCE -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64" \
             --with-zlib=/tmp/zlib-${{ env.ZLIB_VERSION }} \
             --without-http_scgi_module \
             --without-http_uwsgi_module \
@@ -208,7 +208,6 @@ jobs:
             --http-log-path=/var/log/nginx/access.log \
             --http-client-body-temp-path=/var/lib/nginx/body \
             --http-proxy-temp-path=/var/lib/nginx/proxy
-          # TODO gzip: drop --without-http_gzip_module and add --with-zlib=/tmp/zlib-${ZLIB_VERSION}
           make -j$(nproc)
           BINARY="objs/nginx"
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
