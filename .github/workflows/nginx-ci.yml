@@ -155,6 +155,22 @@ jobs:
           cd /tmp && tar -xzf openssl.tar.gz
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=openssl_downloaded version=${{ env.OPENSSL_VERSION }}"
 
+      - name: "Pre-configure openssl for linux-aarch64 musl"
+        run: |
+          # OpenSSL by default detects glibc and uses LFS wrappers (fopen64,
+          # stat64, etc.) which musl does not provide. The linux-aarch64
+          # target uses native 64-bit syscalls, matching musl ABI.
+          # We pre-Configure here so that nginx's internal `make` step picks
+          # up our generated Makefile instead of running its own ./Configure
+          # without the explicit target.
+          cd /tmp/openssl-${{ env.OPENSSL_VERSION }}
+          CC=musl-gcc ./Configure linux-aarch64 \
+            no-shared no-afalgeng no-async no-engine no-tests \
+            -D_FORTIFY_SOURCE=0 -U_FORTIFY_SOURCE \
+            -mcpu=cortex-a53 -Os \
+            --prefix=/tmp/openssl-${{ env.OPENSSL_VERSION }}/.openssl
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=openssl_preconfigured target=linux-aarch64"
+
       - name: "Download zlib ${{ env.ZLIB_VERSION }} source"
         run: |
           curl -fsSL "https://github.com/madler/zlib/releases/download/v${{ env.ZLIB_VERSION }}/zlib-${{ env.ZLIB_VERSION }}.tar.gz" \
@@ -197,7 +213,6 @@ jobs:
             --with-http_stub_status_module \
             --with-http_ssl_module \
             --with-openssl=/tmp/openssl-${{ env.OPENSSL_VERSION }} \
-            --with-openssl-opt="no-shared no-afalgeng no-async no-engine -D_FORTIFY_SOURCE=0 -U_FORTIFY_SOURCE -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64" \
             --with-zlib=/tmp/zlib-${{ env.ZLIB_VERSION }} \
             --without-http_scgi_module \
             --without-http_uwsgi_module \
