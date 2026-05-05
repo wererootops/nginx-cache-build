@@ -63,8 +63,7 @@ env:
   COSIGN_SHA256: "bedac92e8c3729864e13d4a17048007cfafa79d5deca993a43a90ffe018ef2b8"
   ARTIFACT_BASE: "nginx-${{ inputs.nginx_version }}-aarch64-linux-musl"
   PCRE2_VERSION: "10.44"
-  OPENSSL_VERSION: "3.5.6"
-  OPENSSL_SHA256: "deae7c80cba99c4b4f940ecadb3c3338b13cb77418409238e57d7f31f2a3b736"
+  # TODO SSL: OPENSSL_VERSION: "3.x.y"
   # TODO gzip: ZLIB_VERSION: "1.3.1"
 
 jobs:
@@ -158,15 +157,6 @@ jobs:
           cd /tmp && tar -xf nginx.tar.gz
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=source_downloaded version=${{ env.NGINX_VERSION }}"
 
-      - name: "Download openssl ${{ env.OPENSSL_VERSION }} source"
-        run: |
-          curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz.sha256" \
-            -o /tmp/openssl.tar.gz
-          # TODO supply-chain: pin OpenSSL tarball SHA256 and verify before extracting.
-          # https://github.com/openssl/openssl/releases/download/openssl-3.5.6/openssl-3.5.6.tar.gz.sha256
-          cd /tmp && tar -xzf openssl.tar.gz
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=openssl_downloaded version=${{ env.OPENSSL_VERSION }}"
-
       - name: "Patch nginx ngx_linux_config.h for musl compat"
         run: |
           # nginx 1.26.x ngx_linux_config.h does an unconditional #include <crypt.h>.
@@ -190,8 +180,6 @@ jobs:
             --with-http_v2_module \
             --with-http_realip_module \
             --with-http_stub_status_module \
-            --with-http_ssl_module \
-            --with-openssl=/tmp/openssl-${{ env.OPENSSL_VERSION }} \
             --without-http_gzip_module \
             --without-http_scgi_module \
             --without-http_uwsgi_module \
@@ -202,6 +190,7 @@ jobs:
             --http-log-path=/var/log/nginx/access.log \
             --http-client-body-temp-path=/var/lib/nginx/body \
             --http-proxy-temp-path=/var/lib/nginx/proxy
+          # TODO SSL: add --with-http_ssl_module and --with-openssl=/tmp/openssl-${OPENSSL_VERSION}
           # TODO gzip: drop --without-http_gzip_module and add --with-zlib=/tmp/zlib-${ZLIB_VERSION}
           make -j$(nproc)
           BINARY="objs/nginx"
