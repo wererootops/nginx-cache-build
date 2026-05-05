@@ -192,7 +192,7 @@ jobs:
             --with-http_stub_status_module \
             --with-http_ssl_module \
             --with-openssl=/tmp/openssl-${{ env.OPENSSL_VERSION }} \
-            --with-openssl-opt="no-shared no-asm" \
+            --with-openssl-opt="no-shared no-asm enable-oqs-provider" \
             --without-http_gzip_module \
             --without-http_scgi_module \
             --without-http_uwsgi_module \
