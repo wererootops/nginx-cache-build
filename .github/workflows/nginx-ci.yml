@@ -34,14 +34,6 @@ on:
         required: true
         default: "1.26.3"
         type: string
-      run_anchore_only:
-        description: "Run only the anchore experimental job (skip build and tests)"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
       run_new_build:
         description: "Run new build (or smoke-official only)"
         required: true
@@ -78,7 +70,6 @@ jobs:
 
   get-official:
     name: "Get official nginx + SAST"
-    if: ${{ inputs.run_anchore_only != 'true' }}
     runs-on: ubuntu-24.04-arm
 
     permissions:
@@ -101,6 +92,47 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # SAST chain: anchore (syft -> grype) is the primary scanner.
+      # Trivy is kept in parallel as a double-check during the migration window.
+
+      - name: "SBOM: syft scan registry:nginx:${{ env.NGINX_VERSION }}-alpine"
+        uses: wererootops/actions/sbom@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
+        with:
+          target: "registry:nginx:${{ env.NGINX_VERSION }}-alpine"
+          output_file: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          format: "cyclonedx-json"
+          syft_version: "v1.44.0"
+          cosign_version: "${{ env.COSIGN_VERSION }}"
+          cosign_sha256: "${{ env.COSIGN_SHA256 }}"
+
+      - name: "Upload SBOM"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: "sbom-official"
+          path: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: "SAST: grype scan SBOM"
+        uses: wererootops/actions/sast-container@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
+        with:
+          sbom_path: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          output_file: "${{ env.ARTIFACT_BASE }}.grype.json"
+          format: "json"
+          grype_version: "v0.112.0"
+          cosign_version: "${{ env.COSIGN_VERSION }}"
+          cosign_sha256: "${{ env.COSIGN_SHA256 }}"
+
+      - name: "Upload grype audit report"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: "grype-report"
+          path: "${{ env.ARTIFACT_BASE }}.grype.json"
+          retention-days: 1
+          if-no-files-found: error
+
+      # Trivy kept in parallel as double-check.
+      # TODO migration-window: remove once anchore is validated as sole SAST.
       - name: "SAST: trivy scan nginx:${{ env.NGINX_VERSION }}-alpine"
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
@@ -110,7 +142,7 @@ jobs:
             --output "${{ env.ARTIFACT_BASE }}.sast.json" \
             --exit-code 0 \
             "nginx:${{ env.NGINX_VERSION }}-alpine"
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sast target=nginx:${{ env.NGINX_VERSION }}-alpine format=json"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sast target=nginx:${{ env.NGINX_VERSION }}-alpine format=json scanner=trivy"
 
       - name: "Upload SAST report"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -339,55 +371,3 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  anchore-experiment:
-    name: "Anchore SBOM experiment"
-    if: ${{ inputs.run_anchore_only == 'true' }}
-    runs-on: ubuntu-24.04-arm
-  
-    permissions:
-      contents: read
-  
-    steps:
-      - name: "Download nginx source as test target"
-        run: |
-          curl -fsSL --max-time 60 --retry 3 --retry-delay 5 \
-            "https://nginx.org/download/nginx-${{ env.NGINX_VERSION }}.tar.gz" \
-            -o /tmp/nginx.tar.gz
-          cd /tmp && tar -xf nginx.tar.gz
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=test_target_ready version=${{ env.NGINX_VERSION }}"
-  
-      - name: "Generate SBOM with syft"
-        uses: wererootops/actions/sbom@1b5d7dd8f03d1f511fc7c2f66b1aae891f1c3986  # v1.1.0
-        with:
-          target: "registry:nginx:${{ env.NGINX_VERSION }}-alpine"
-          output_file: "/tmp/${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
-          format: "cyclonedx-json"
-          syft_version: "v1.44.0"
-          cosign_version: "${{ env.COSIGN_VERSION }}"
-          cosign_sha256: "${{ env.COSIGN_SHA256 }}" 
-
-      - name: "Upload SBOM for inspection"
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: "syft-sbom-experiment"
-          path: /tmp/${{ env.ARTIFACT_BASE }}.sbom.cdx.json
-          retention-days: 1
-          if-no-files-found: error
-
-      - name: "Scan SBOM with grype"
-        uses: wererootops/actions/sast-container@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
-        with:
-          sbom_path: "/tmp/${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
-          output_file: "/tmp/${{ env.ARTIFACT_BASE }}.grype.json"
-          format: "json"
-          grype_version: "v0.112.0"
-          cosign_version: "${{ env.COSIGN_VERSION }}"
-          cosign_sha256: "${{ env.COSIGN_SHA256 }}"
-
-      - name: "Upload grype audit report"
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: "grype-audit-experiment"
-          path: /tmp/${{ env.ARTIFACT_BASE }}.grype.json
-          retention-days: 1
-          if-no-files-found: error
