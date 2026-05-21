@@ -243,27 +243,106 @@ jobs:
           path: "/tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx"
           output_file: "${{ env.ARTIFACT_BASE }}.sha256"
 
-      - name: "Generate SBOM"
+      - name: "Generate SBOM (declarative CycloneDX)"
         run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin
-          trivy fs \
-            --format cyclonedx \
-            --output "${{ env.ARTIFACT_BASE }}.sbom.cdx.json" \
-            /tmp/nginx-${{ env.NGINX_VERSION }}/
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sbom format=cyclonedx"
+          BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          MUSL_VERSION=$(dpkg-query -W -f='${Version}' musl-tools 2>/dev/null || echo "unknown")
+          SERIAL_UUID="urn:uuid:$(cat /proc/sys/kernel/random/uuid)"
+
+          jq -n \
+            --arg nginx_version "${{ env.NGINX_VERSION }}" \
+            --arg pcre2_version "${{ env.PCRE2_VERSION }}" \
+            --arg musl_version "$MUSL_VERSION" \
+            --arg timestamp "$BUILD_TIMESTAMP" \
+            --arg serial "$SERIAL_UUID" \
+            --arg artifact "${{ env.ARTIFACT_BASE }}" \
+            '{
+              "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+              bomFormat: "CycloneDX",
+              specVersion: "1.6",
+              serialNumber: $serial,
+              version: 1,
+              metadata: {
+                timestamp: $timestamp,
+                tools: {
+                  components: [
+                    { type: "application", name: "wererootops/nginx-cache-build", version: "1.0" }
+                  ]
+                },
+                component: {
+                  type: "application",
+                  name: $artifact,
+                  version: $nginx_version,
+                  description: "nginx static-musl build for aarch64",
+                  cpe: ("cpe:2.3:a:nginx:nginx:" + $nginx_version + ":*:*:*:*:*:*:*")
+                }
+              },
+              components: [
+                {
+                  type: "library",
+                  "bom-ref": "nginx",
+                  name: "nginx",
+                  version: $nginx_version,
+                  purl: ("pkg:generic/nginx@" + $nginx_version),
+                  cpe: ("cpe:2.3:a:nginx:nginx:" + $nginx_version + ":*:*:*:*:*:*:*")
+                },
+                {
+                  type: "library",
+                  "bom-ref": "pcre2",
+                  name: "pcre2",
+                  version: $pcre2_version,
+                  purl: ("pkg:generic/pcre2@" + $pcre2_version),
+                  cpe: ("cpe:2.3:a:pcre:pcre2:" + $pcre2_version + ":*:*:*:*:*:*:*")
+                },
+                {
+                  type: "library",
+                  "bom-ref": "musl",
+                  name: "musl",
+                  version: $musl_version,
+                  purl: ("pkg:deb/ubuntu/musl-tools@" + $musl_version + "?arch=arm64"),
+                  cpe: ("cpe:2.3:a:musl-libc:musl:" + $musl_version + ":*:*:*:*:*:*:*")
+                }
+              ]
+            }' > "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sbom_generated format=cyclonedx-json target=declarative nginx=${{ env.NGINX_VERSION }} pcre2=${{ env.PCRE2_VERSION }} musl=$MUSL_VERSION"
+
+      - name: "SAST: grype scan build SBOM"
+        uses: wererootops/actions/sast-container@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
+        with:
+          sbom_path: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          output_file: "${{ env.ARTIFACT_BASE }}.grype.json"
+          format: "json"
+          grype_version: "v0.112.0"
+          cosign_version: "${{ env.COSIGN_VERSION }}"
+          cosign_sha256: "${{ env.COSIGN_SHA256 }}"
+
+      # Trivy kept in parallel as double-check during the migration window.
+      # TODO migration-window: remove once anchore is validated as sole SAST.
+      - name: "SAST: trivy scan build SBOM (double-check)"
+        run: |
+          if ! command -v trivy >/dev/null 2>&1; then
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+              | sh -s -- -b /usr/local/bin
+          fi
+          trivy sbom \
+            --format json \
+            --output "${{ env.ARTIFACT_BASE }}.trivy.json" \
+            --exit-code 0 \
+            "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sast target=build_sbom format=json scanner=trivy"
 
       - name: "Prepare bundle"
         run: |
           mkdir -p bundle
           cp /tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx \
             bundle/${{ env.ARTIFACT_BASE }}
-          # Stable filename for downstream jobs (smoke tests, verify) that don't
-          # care about versioning. Versioned name is preserved for release.
           cp /tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx \
             bundle/nginx
           cp ${{ env.ARTIFACT_BASE }}.sha256 bundle/
           cp ${{ env.ARTIFACT_BASE }}.sbom.cdx.json bundle/
+          cp ${{ env.ARTIFACT_BASE }}.grype.json bundle/
+          cp ${{ env.ARTIFACT_BASE }}.trivy.json bundle/
 
       - name: "Sign binary"
         uses: wererootops/actions/sign@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
@@ -360,7 +439,8 @@ jobs:
           sha256_path: "bundle/${{ env.ARTIFACT_BASE }}.sha256"
           sbom_path: "bundle/${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
           cosign_bundle_path: "bundle/${{ env.ARTIFACT_BASE }}.cosign.bundle"
-          sast_report_path: "bundle/${{ env.ARTIFACT_BASE }}.sast.json"
+          # was: sast_report_path: "bundle/${{ env.ARTIFACT_BASE }}.sast.json"
+          sast_report_path: "bundle/${{ env.ARTIFACT_BASE }}.grype.json"
           output_dir: "rc"
 
       - name: "Upload release candidate"
