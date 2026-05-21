@@ -357,14 +357,14 @@ jobs:
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=test_target_ready version=${{ env.NGINX_VERSION }}"
   
       - name: "Generate SBOM with syft"
-       uses: wererootops/actions/sbom@1b5d7dd8f03d1f511fc7c2f66b1aae891f1c3986  # v1.1.0
-       with:
-         target: "registry:nginx:${{ env.NGINX_VERSION }}-alpine"
-         output_file: "/tmp/${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
-         format: "cyclonedx-json"
-         syft_version: "v1.44.0"
-         cosign_version: "${{ env.COSIGN_VERSION }}"
-         cosign_sha256: "${{ env.COSIGN_SHA256 }}" 
+        uses: wererootops/actions/sbom@1b5d7dd8f03d1f511fc7c2f66b1aae891f1c3986  # v1.1.0
+        with:
+          target: "registry:nginx:${{ env.NGINX_VERSION }}-alpine"
+          output_file: "/tmp/${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          format: "cyclonedx-json"
+          syft_version: "v1.44.0"
+          cosign_version: "${{ env.COSIGN_VERSION }}"
+          cosign_sha256: "${{ env.COSIGN_SHA256 }}" 
 
       - name: "Upload SBOM for inspection"
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
