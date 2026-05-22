@@ -8,21 +8,37 @@
 # Compilation: native aarch64. -mcpu=cortex-a53 sets ABI baseline for target.
 # C library: musl static via apt-installed musl-tools (musl-gcc wrapper).
 #
-# get-official: installs nginx from apt (native aarch64), runs trivy SAST against
-#   the official nginx:VERSION-alpine image.
-#   NOTE: apt-installed version may not match NGINX_VERSION input; SAST runs
-#   against the specific tag via Docker Hub. Divergence is expected.
+# SAST chain: anchore (syft for SBOM, grype for vuln scan) is the primary
+#   scanner across both upstream and build artifacts. Trivy retained in
+#   parallel inside get-official as double-check against grype on the
+#   official alpine image. Migrated from trivy-as-primary after the
+#   March 2026 trivy-action compromise (UNC6780 / TeamPCP).
+#
+# get-official: pulls nginx:VERSION-alpine and produces SBOM (syft, CycloneDX
+#   from registry image) plus vuln scan (grype on the SBOM, plus trivy image
+#   in parallel as double-check). Also installs nginx from apt for the smoke
+#   test downstream.
+#   NOTE: apt-installed binary version may not match NGINX_VERSION input;
+#   the SBOM and scans target the alpine tag explicitly. Divergence expected.
 # smoke-official: validates HTTP contract against the official binary.
-# build-native: compiles nginx aarch64-musl static. PCRE2 is built as a source tree
-#   (nginx compiles it internally with musl-gcc).
-#   TODO SSL: add OpenSSL build from source with musl-gcc, --with-openssl=path,
-#     --with-http_ssl_module in configure.
+# build-native: compiles nginx aarch64-musl static linked against PCRE2 from
+#   source. After build, generates a declarative CycloneDX SBOM via jq
+#   listing the three components linked in: nginx (NGINX_VERSION), pcre2
+#   (PCRE2_VERSION), musl (from runner musl-tools). Grype scans the SBOM via
+#   CPE matching.
+#   Trivy not viable on this SBOM: trivy sbom is OS-package-centric and bails
+#   out on the pkg:generic PURLs used here (validated empirically in run
+#   26252203568).
+#   No SSL: OpenSSL static-musl aarch64 build did not succeed on target after
+#     multiple attempts. Deploy host (AURELIO) runs a separate factory
+#     nginx-ssl alongside this cache for TLS termination.
 #   TODO gzip: add zlib build from source with musl-gcc, --with-zlib=path,
 #     remove --without-http_gzip_module.
 # smoke-compiled: validates HTTP contract against the freshly built binary.
 #   Possible because runner and target share aarch64.
 # verify-binary: static checks (ELF aarch64, no dynamic deps).
-# publish: bundles SBOM, SHA256, cosign signature, SAST.
+# publish: bundles binary, SHA256, declarative SBOM, cosign signature, grype
+#   audit report.
 
 name: nginx-ci
 
@@ -238,7 +254,7 @@ jobs:
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
 
       - name: "Compute SHA256"
-        uses: wererootops/actions/checksum@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
+        uses: wererootops/actions/checksum@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
         with:
           path: "/tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx"
           output_file: "${{ env.ARTIFACT_BASE }}.sha256"
@@ -317,21 +333,6 @@ jobs:
           cosign_version: "${{ env.COSIGN_VERSION }}"
           cosign_sha256: "${{ env.COSIGN_SHA256 }}"
 
-      # Trivy kept in parallel as double-check during the migration window.
-      # TODO migration-window: remove once anchore is validated as sole SAST.
-      - name: "SAST: trivy scan build SBOM (double-check)"
-        run: |
-          if ! command -v trivy >/dev/null 2>&1; then
-            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-              | sh -s -- -b /usr/local/bin
-          fi
-          trivy sbom \
-            --format json \
-            --output "${{ env.ARTIFACT_BASE }}.trivy.json" \
-            --exit-code 0 \
-            "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sast target=build_sbom format=json scanner=trivy"
-
       - name: "Prepare bundle"
         run: |
           mkdir -p bundle
@@ -342,10 +343,9 @@ jobs:
           cp ${{ env.ARTIFACT_BASE }}.sha256 bundle/
           cp ${{ env.ARTIFACT_BASE }}.sbom.cdx.json bundle/
           cp ${{ env.ARTIFACT_BASE }}.grype.json bundle/
-          cp ${{ env.ARTIFACT_BASE }}.trivy.json bundle/
 
       - name: "Sign binary"
-        uses: wererootops/actions/sign@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
+        uses: wererootops/actions/sign@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
         with:
           path: "bundle/${{ env.ARTIFACT_BASE }}"
           bundle_output: "bundle/${{ env.ARTIFACT_BASE }}.cosign.bundle"
@@ -428,7 +428,7 @@ jobs:
           path: bundle/
 
       - name: "Package release"
-        uses: wererootops/actions/release@6b20e28e61d3fa74529f18a1e162168af025b879  # v1.0.0
+        uses: wererootops/actions/release@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
         with:
           binary_path: "bundle/${{ env.ARTIFACT_BASE }}"
           binary_name: "nginx"
