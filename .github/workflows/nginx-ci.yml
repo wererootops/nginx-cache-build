@@ -78,6 +78,7 @@ env:
   COSIGN_VERSION: "v3.0.6"
   COSIGN_SHA256: "bedac92e8c3729864e13d4a17048007cfafa79d5deca993a43a90ffe018ef2b8"
   ARTIFACT_BASE: "nginx-${{ inputs.nginx_version }}-aarch64-linux-musl"
+  OFFICIAL_BASE: "nginx-${{ inputs.nginx_version }}-alpine-official"
   PCRE2_VERSION: "10.44"
   # TODO SSL: OPENSSL_VERSION: "3.x.y"
   # TODO gzip: ZLIB_VERSION: "1.3.1"
@@ -115,7 +116,7 @@ jobs:
         uses: wererootops/actions/sbom@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
         with:
           target: "registry:nginx:${{ env.NGINX_VERSION }}-alpine"
-          output_file: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          output_file: "${{ env.OFFICIAL_BASE }}.sbom.cdx.json"
           format: "cyclonedx-json"
           syft_version: "v1.44.0"
           cosign_version: "${{ env.COSIGN_VERSION }}"
@@ -125,15 +126,15 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: "sbom-official"
-          path: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
+          path: "${{ env.OFFICIAL_BASE }}.sbom.cdx.json"
           retention-days: 1
           if-no-files-found: error
 
       - name: "SAST: grype scan SBOM"
         uses: wererootops/actions/sast-container@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
         with:
-          sbom_path: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
-          output_file: "${{ env.ARTIFACT_BASE }}.grype.json"
+          sbom_path: "${{ env.OFFICIAL_BASE }}.sbom.cdx.json"
+          output_file: "${{ env.OFFICIAL_BASE }}.grype.json"
           format: "json"
           grype_version: "v0.112.0"
           cosign_version: "${{ env.COSIGN_VERSION }}"
@@ -143,7 +144,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: "grype-report"
-          path: "${{ env.ARTIFACT_BASE }}.grype.json"
+          path: "${{ env.OFFICIAL_BASE }}.grype.json"
           retention-days: 1
           if-no-files-found: error
 
@@ -164,7 +165,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: "sast-report"
-          path: "${{ env.ARTIFACT_BASE }}.sast.json"
+          path: "${{ env.OFFICIAL_BASE }}.sast.json"
           retention-days: 1
           if-no-files-found: error
 
