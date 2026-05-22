@@ -48,7 +48,7 @@ on:
       nginx_version:
         description: "nginx version (e.g. 1.26.3)"
         required: true
-        default: "1.26.3"
+        default: "1.30.1"   # was: "1.26.3"
         type: string
       run_new_build:
         description: "Run new build (or smoke-official only)"
