@@ -254,75 +254,24 @@ jobs:
           BINARY="objs/nginx"
           echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=build_done size=$(du -sh $BINARY | cut -f1) sha256=$(sha256sum $BINARY | cut -d' ' -f1)"
 
+      - name: "Stage musl source dir marker"
+        run: |
+          MUSL_VERSION=$(dpkg-query -W -f='${Version}' musl-tools | cut -d'-' -f1)
+          mkdir -p "/tmp/musl-${MUSL_VERSION}"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=musl_stage_dir version=$MUSL_VERSION"
+
       - name: "Compute SHA256"
         uses: wererootops/actions/checksum@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
         with:
           path: "/tmp/nginx-${{ env.NGINX_VERSION }}/objs/nginx"
           output_file: "${{ env.ARTIFACT_BASE }}.sha256"
 
-      - name: "Generate SBOM (declarative CycloneDX)"
-        run: |
-          BUILD_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          MUSL_VERSION=$(dpkg-query -W -f='${Version}' musl-tools 2>/dev/null || echo "unknown")
-          SERIAL_UUID="urn:uuid:$(cat /proc/sys/kernel/random/uuid)"
-
-          jq -n \
-            --arg nginx_version "${{ env.NGINX_VERSION }}" \
-            --arg pcre2_version "${{ env.PCRE2_VERSION }}" \
-            --arg musl_version "$MUSL_VERSION" \
-            --arg timestamp "$BUILD_TIMESTAMP" \
-            --arg serial "$SERIAL_UUID" \
-            --arg artifact "${{ env.ARTIFACT_BASE }}" \
-            '{
-              "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
-              bomFormat: "CycloneDX",
-              specVersion: "1.6",
-              serialNumber: $serial,
-              version: 1,
-              metadata: {
-                timestamp: $timestamp,
-                tools: {
-                  components: [
-                    { type: "application", name: "wererootops/nginx-cache-build", version: "1.0" }
-                  ]
-                },
-                component: {
-                  type: "application",
-                  name: $artifact,
-                  version: $nginx_version,
-                  description: "nginx static-musl build for aarch64",
-                  cpe: ("cpe:2.3:a:nginx:nginx:" + $nginx_version + ":*:*:*:*:*:*:*")
-                }
-              },
-              components: [
-                {
-                  type: "library",
-                  "bom-ref": "nginx",
-                  name: "nginx",
-                  version: $nginx_version,
-                  purl: ("pkg:generic/nginx@" + $nginx_version),
-                  cpe: ("cpe:2.3:a:nginx:nginx:" + $nginx_version + ":*:*:*:*:*:*:*")
-                },
-                {
-                  type: "library",
-                  "bom-ref": "pcre2",
-                  name: "pcre2",
-                  version: $pcre2_version,
-                  purl: ("pkg:generic/pcre2@" + $pcre2_version),
-                  cpe: ("cpe:2.3:a:pcre2:pcre2:" + $pcre2_version + ":*:*:*:*:*:*:*")
-                },
-                {
-                  type: "library",
-                  "bom-ref": "musl",
-                  name: "musl",
-                  version: $musl_version,
-                  purl: ("pkg:deb/ubuntu/musl-tools@" + $musl_version + "?arch=arm64"),
-                  cpe: ("cpe:2.3:a:musl-libc:musl:" + $musl_version + ":*:*:*:*:*:*:*")
-                }
-              ]
-            }' > "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
-
-          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ) level=info event=sbom_generated format=cyclonedx-json target=declarative nginx=${{ env.NGINX_VERSION }} pcre2=${{ env.PCRE2_VERSION }} musl=$MUSL_VERSION"
+      - name: "Generate SBOM"
+        uses: wererootops/actions/sbom-c-build@5e0fa394c9a1dbdb2a1eec4f767362e8c074083c  #v1.3.0
+        with:
+          project_name: "nginx"
+          source_scan_path: "/tmp"
+          output_file: "${{ env.ARTIFACT_BASE }}.sbom.cdx.json"
 
       - name: "SAST: grype scan build SBOM"
         uses: wererootops/actions/sast-container@f474cbdcf8f0fb02b8f81b8d8df543b0e89b53d6  # v1.2.0
